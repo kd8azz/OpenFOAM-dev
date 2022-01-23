@@ -1,0 +1,3 @@
+aiGym.C
+
+EXE = $(FOAM_APPBIN)/aiGym
