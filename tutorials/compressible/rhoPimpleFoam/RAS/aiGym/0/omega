@@ -20,14 +20,6 @@ internalField   uniform 2.6;
 
 boundaryField
 {
-    movingWall
-    {
-        type            omegaWallFunction;
-        Cmu             0.09;
-        kappa           0.41;
-        E               9.8;
-        value           uniform 2.6;
-    }
     fixedWalls
     {
         type            omegaWallFunction;
@@ -35,10 +27,6 @@ boundaryField
         kappa           0.41;
         E               9.8;
         value           uniform 2.6;
-    }
-    frontAndBack
-    {
-        type            empty;
     }
 }
 

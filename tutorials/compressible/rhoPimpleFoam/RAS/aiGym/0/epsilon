@@ -20,21 +20,10 @@ internalField   uniform 0.000765;
 
 boundaryField
 {
-    movingWall
-    {
-        type            epsilonWallFunction;
-        value           $internalField;
-    }
-
     fixedWalls
     {
         type            epsilonWallFunction;
         value           $internalField;
-    }
-
-    frontAndBack
-    {
-        type            empty;
     }
 }
 

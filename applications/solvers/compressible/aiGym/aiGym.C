@@ -33,6 +33,12 @@ Description
 
 \*---------------------------------------------------------------------------*/
 
+#include <cmath>
+#include <zmq.hpp>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/archive/text_iarchive.hpp>
+#include <sstream>
+
 #include "fvCFD.H"
 #include "fluidThermo.H"
 #include "compressibleMomentumTransportModels.H"
@@ -47,8 +53,39 @@ Description
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
+struct pcm_out {
+    double pressure = 0.d;
+    int movement_x = 0;
+    int movement_y = 0;
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & pressure;
+        ar & movement_x;
+        ar & movement_y;
+    }
+};
+struct pcm_in {
+    double pressure = 0.d;
+    int requested_movement_x = 0;
+    int requested_movement_y = 0;
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version)
+    {
+        ar & pressure;
+        ar & requested_movement_x;
+        ar & requested_movement_y;
+    }
+};
+
 int main(int argc, char *argv[])
 {
+    Info<< "Opening socket to AI controller.\n";
+    zmq::context_t context{1};
+    zmq::socket_t socket{context, zmq::socket_type::req};
+    socket.connect("tcp://localhost:5555");
+    Info<< "Socket open on this end.\n";
+
     #include "postProcess.H"
 
     #include "setRootCaseLists.H"
@@ -70,10 +107,48 @@ int main(int argc, char *argv[])
 
     // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-    Info<< "\nStarting time loop\n" << endl;
+    Info<< "\nStarting time loop with deltaT = " << runTime.deltaTValue() << "\n" << endl;
 
+    int width = 300;
+    int height = 300;
+    int x = 100;
+    int y = 20;
+    int prev_x = x;
+    int prev_y = y;
     while (pimple.run(runTime))
     {
+        int cell = width * y + x;
+
+        {
+            std::ostringstream oss;
+            boost::archive::text_oarchive oa(oss);
+            pcm_out out;
+            out.pressure = rho[cell];
+            out.movement_x = x - prev_x;
+            out.movement_y = y - prev_y;
+            oa << out;
+            socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
+        }
+
+        prev_x = x;
+        prev_y = y;
+
+        {
+            zmq::message_t reply{};
+            socket.recv(reply, zmq::recv_flags::none);
+            std::istringstream iss(reply.to_string());
+            boost::archive::text_iarchive ia(iss);
+            pcm_in in;
+            ia >> in;
+            rho[cell] = in.pressure;
+            x += in.requested_movement_x;
+            if (x < 0) x = 0;
+            if (x >= width) x = width - 1;
+            y += in.requested_movement_y;
+            if (y < 0) y = 0;
+            if (y >= height) y = height - 1;
+        }
+
         #include "readDyMControls.H"
 
         // Store divrhoU from the previous mesh so that it can be mapped

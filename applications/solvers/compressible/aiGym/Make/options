@@ -19,4 +19,6 @@ EXE_LIBS = \
     -lmeshTools \
     -lsampling \
     -lfvModels \
-    -lfvConstraints
+    -lfvConstraints \
+    -lzmq \
+    -l:libboost_serialization.a

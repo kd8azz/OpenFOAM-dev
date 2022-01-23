@@ -20,19 +20,10 @@ internalField   uniform 0.00325;
 
 boundaryField
 {
-    movingWall
-    {
-        type            kqRWallFunction;
-        value           uniform 0.00325;
-    }
     fixedWalls
     {
         type            kqRWallFunction;
         value           uniform 0.00325;
-    }
-    frontAndBack
-    {
-        type            empty;
     }
 }
 
