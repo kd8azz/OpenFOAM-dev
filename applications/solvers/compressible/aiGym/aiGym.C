@@ -57,8 +57,8 @@ Description
 
 // 2D for now.
 struct Coords {
-    int32_t x = 0;
-    int32_t y = 0;
+    double x = 0;
+    double y = 0;
     Coords& operator+=(Coords other) {
         x += other.x;
         y += other.y;
@@ -78,6 +78,13 @@ struct Coords {
         ar & y;
     }
 };
+template <typename Number>
+Coords operator*(const Coords& coords, Number number) {
+    Coords result = coords;
+    result.x *= number;
+    result.y *= number;
+    return result;
+}
 struct Actor {
     int32_t id;
     Coords position;
@@ -169,6 +176,14 @@ int main(int argc, char *argv[])
 
     int width = 300;
     int height = 300;
+    auto getRho = [&](double x, double y) -> double {
+      int cell = width * static_cast<int>(y) + static_cast<int>(x);
+      return rho[cell];
+    };
+    auto setRho  = [&](double x, double y, double value) {
+      int cell = width * static_cast<int>(y) + static_cast<int>(x);
+      rho[cell] = value;
+    };
 
     double average_pressure = 0.0d;
     for (int x = 0; x < width; ++x) {
@@ -183,64 +198,49 @@ int main(int argc, char *argv[])
     while (pimple.run(runTime))
     {
         {
-            Info<< "<Gym Step>\n";
             {
                 ActionRequest request;
                 request.changes.reserve(actors.size());
-                Info<< "Processing " << actors.size() << " actors.\n";
                 for (auto& pair : actors) {
                     Actor& actor = pair.second;
-                    actor.position += actor.velocity;
+                    actor.position += actor.velocity * runTime.deltaTValue();
                     actor.position.Clamp(0, width, 0, height);
-                    int cell = width * actor.position.y + actor.position.x;
 
                     ActorStateChange state_change;
                     state_change.id = actor.id;
-                    state_change.relative_pressure = rho[cell] - average_pressure;
-                    actor.last_observed_relative_pressure = rho[cell] - average_pressure;
+                    state_change.relative_pressure = getRho(actor.position.x, actor.position.y) - average_pressure;
+                    actor.last_observed_relative_pressure = getRho(actor.position.x, actor.position.y) - average_pressure;
                     request.changes.push_back(state_change);
                 }
-                Info<< "Done processing actors.\n";
 
-                Info<< "Encoding.\n";
                 std::ostringstream oss;
                 boost::archive::text_oarchive oa(oss);
                 oa << request;
-                Info<< "Sending.\n";
                 socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
-                Info<< "Sent.\n";
             }
 
             {
-                Info<< "Receiving.\n";
                 zmq::message_t reply{};
                 socket.recv(reply, zmq::recv_flags::none);
-                Info<< "Decoding.\n";
                 std::istringstream iss(reply.to_string());
                 boost::archive::text_iarchive ia(iss);
                 ActionResponse response;
                 ia >> response;
-                Info<< "Decoded.\n";
 
-                Info<< "Processing "
-                    << response.erase_actors.size() << " erasures, "
-                    << response.new_actors.size() << " creations, and "
-                    << response.changes.size() << " changes.\n";
                 for (const int32_t erase : response.erase_actors) {
                     actors.erase(erase);
                 }
                 for (Actor& actor: response.new_actors) {
-                    int cell = width * actor.position.y + actor.position.x;
                     actors[actor.id] = actor;
                 }
                 for (const ActorStateChange& change : response.changes) {
                     Actor& actor = actors[change.id];
-                    int cell = width * actor.position.y + actor.position.x;
-                    rho[cell] += change.relative_pressure - actor.last_observed_relative_pressure;
+                    double value = getRho(actor.position.x, actor.position.y);
+                    value += change.relative_pressure - actor.last_observed_relative_pressure;
+                    setRho(actor.position.x, actor.position.y, value);
                     actor.velocity += change.velocity_change;
                 }
             }
-            Info<< "</Gym Step>.\n";
         }
 
         #include "readDyMControls.H"
