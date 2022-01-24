@@ -34,10 +34,12 @@ Description
 \*---------------------------------------------------------------------------*/
 
 #include <cmath>
-#include <zmq.hpp>
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
+#include <boost/serialization/vector.hpp>
+#include <map>
 #include <sstream>
+#include <zmq.hpp>
 
 #include "fvCFD.H"
 #include "fluidThermo.H"
@@ -53,28 +55,84 @@ Description
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-struct pcm_out {
-    double pressure = 0.d;
-    int movement_x = 0;
-    int movement_y = 0;
+// 2D for now.
+struct Coords {
+    int32_t x = 0;
+    int32_t y = 0;
+    Coords& operator+=(Coords other) {
+        x += other.x;
+        y += other.y;
+        return *this;
+    }
+    void Clamp(int32_t min_x, int32_t max_x, int32_t min_y, int32_t max_y) {
+        if (x < min_x) x = min_x;
+        if (x >= max_x) x = max_x - 1;
+        if (y < min_y) y = min_y;
+        if (y >= max_y) y = max_y - 1;
+    }
+
     template<class Archive>
-    void serialize(Archive & ar, const unsigned int version)
+    void serialize(Archive& ar, const unsigned int version)
     {
-        ar & pressure;
-        ar & movement_x;
-        ar & movement_y;
+        ar & x;
+        ar & y;
     }
 };
-struct pcm_in {
-    double pressure = 0.d;
-    int requested_movement_x = 0;
-    int requested_movement_y = 0;
+struct Actor {
+    int32_t id;
+    Coords position;
+    Coords velocity;
+    // aiGym-side only.
+    double last_observed_relative_pressure = 0.d;
+
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int version)
+    {
+        ar & id;
+        ar & position;
+        ar & velocity;
+    }
+};
+// Both the input and output, for a given Actor's experience.
+// Input: a request to do the following.
+// Output: what actually happened.  E.g. if the actor wants to
+//         accelerate into a wall, they're going to hit it instead.
+struct ActorStateChange {
+    int32_t id = 0;
+    // +/- from average pressure
+    double relative_pressure = 0.d;
+    Coords velocity_change;
+
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int version)
+    {
+        ar & id;
+        ar & relative_pressure;
+        ar & velocity_change;
+    }
+};
+struct ActionRequest {
+    double timestep_duration = 0.d;
+    std::vector<ActorStateChange> changes;
+
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int version)
+    {
+        ar & timestep_duration;
+        ar & changes;
+    }
+};
+struct ActionResponse {
+    std::vector<int32_t> erase_actors;
+    std::vector<Actor> new_actors;
+    std::vector<ActorStateChange> changes;
+
     template<class Archive>
     void serialize(Archive & ar, const unsigned int version)
     {
-        ar & pressure;
-        ar & requested_movement_x;
-        ar & requested_movement_y;
+        ar & new_actors;
+        ar & erase_actors;
+        ar & changes;
     }
 };
 
@@ -111,42 +169,78 @@ int main(int argc, char *argv[])
 
     int width = 300;
     int height = 300;
-    int x = 100;
-    int y = 20;
-    int prev_x = x;
-    int prev_y = y;
+
+    double average_pressure = 0.0d;
+    for (int x = 0; x < width; ++x) {
+        for(int y = 0; y < height; ++y) {
+            int cell = width * y + x;
+            average_pressure += rho[cell];
+        }
+    }
+    average_pressure /= width * height;
+
+    std::map<int32_t, Actor> actors;
     while (pimple.run(runTime))
     {
-        int cell = width * y + x;
-
         {
-            std::ostringstream oss;
-            boost::archive::text_oarchive oa(oss);
-            pcm_out out;
-            out.pressure = rho[cell];
-            out.movement_x = x - prev_x;
-            out.movement_y = y - prev_y;
-            oa << out;
-            socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
-        }
+            Info<< "<Gym Step>\n";
+            {
+                ActionRequest request;
+                request.changes.reserve(actors.size());
+                Info<< "Processing " << actors.size() << " actors.\n";
+                for (auto& pair : actors) {
+                    Actor& actor = pair.second;
+                    actor.position += actor.velocity;
+                    actor.position.Clamp(0, width, 0, height);
+                    int cell = width * actor.position.y + actor.position.x;
 
-        prev_x = x;
-        prev_y = y;
+                    ActorStateChange state_change;
+                    state_change.id = actor.id;
+                    state_change.relative_pressure = rho[cell] - average_pressure;
+                    actor.last_observed_relative_pressure = rho[cell] - average_pressure;
+                    request.changes.push_back(state_change);
+                }
+                Info<< "Done processing actors.\n";
 
-        {
-            zmq::message_t reply{};
-            socket.recv(reply, zmq::recv_flags::none);
-            std::istringstream iss(reply.to_string());
-            boost::archive::text_iarchive ia(iss);
-            pcm_in in;
-            ia >> in;
-            rho[cell] = in.pressure;
-            x += in.requested_movement_x;
-            if (x < 0) x = 0;
-            if (x >= width) x = width - 1;
-            y += in.requested_movement_y;
-            if (y < 0) y = 0;
-            if (y >= height) y = height - 1;
+                Info<< "Encoding.\n";
+                std::ostringstream oss;
+                boost::archive::text_oarchive oa(oss);
+                oa << request;
+                Info<< "Sending.\n";
+                socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
+                Info<< "Sent.\n";
+            }
+
+            {
+                Info<< "Receiving.\n";
+                zmq::message_t reply{};
+                socket.recv(reply, zmq::recv_flags::none);
+                Info<< "Decoding.\n";
+                std::istringstream iss(reply.to_string());
+                boost::archive::text_iarchive ia(iss);
+                ActionResponse response;
+                ia >> response;
+                Info<< "Decoded.\n";
+
+                Info<< "Processing "
+                    << response.erase_actors.size() << " erasures, "
+                    << response.new_actors.size() << " creations, and "
+                    << response.changes.size() << " changes.\n";
+                for (const int32_t erase : response.erase_actors) {
+                    actors.erase(erase);
+                }
+                for (Actor& actor: response.new_actors) {
+                    int cell = width * actor.position.y + actor.position.x;
+                    actors[actor.id] = actor;
+                }
+                for (const ActorStateChange& change : response.changes) {
+                    Actor& actor = actors[change.id];
+                    int cell = width * actor.position.y + actor.position.x;
+                    rho[cell] += change.relative_pressure - actor.last_observed_relative_pressure;
+                    actor.velocity += change.velocity_change;
+                }
+            }
+            Info<< "</Gym Step>.\n";
         }
 
         #include "readDyMControls.H"
