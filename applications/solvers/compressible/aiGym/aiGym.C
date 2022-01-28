@@ -22,14 +22,13 @@ License
     along with OpenFOAM.  If not, see <http://www.gnu.org/licenses/>.
 
 Application
-    rhoPimpleFoam
+    aiGym
 
 Description
-    Transient solver for turbulent flow of compressible fluids for HVAC and
-    similar applications, with optional mesh motion and mesh topology changes.
-
-    Uses the flexible PIMPLE (PISO-SIMPLE) solution for time-resolved and
-    pseudo-transient simulations.
+    AI Gym based on rhoPimpleFoam.  Agents exist as point entities and
+    interact with their environment by modifying air pressure directly.
+    This is intended as a cheap and plausible analogue for audio sensing
+    and production.
 
 \*---------------------------------------------------------------------------*/
 
@@ -88,7 +87,9 @@ Coords operator*(const Coords& coords, Number number) {
 struct Actor {
     int32_t id;
     Coords position;
-    Coords velocity;
+    double theta = 0.f;
+    double speed = 0.f;
+    double friction = 0.f;
     // aiGym-side only.
     double last_observed_relative_pressure = 0.d;
 
@@ -97,7 +98,9 @@ struct Actor {
     {
         ar & id;
         ar & position;
-        ar & velocity;
+        ar & theta;
+        ar & speed;
+        ar & friction;
     }
 };
 // Both the input and output, for a given Actor's experience.
@@ -106,16 +109,24 @@ struct Actor {
 //         accelerate into a wall, they're going to hit it instead.
 struct ActorStateChange {
     int32_t id = 0;
-    // +/- from average pressure
+    // +/- from the average pressure at the start of the simulation.
     double relative_pressure = 0.d;
-    Coords velocity_change;
+    double theta_change = 0.f;
+    double speed_change = 0.f;
+
+    // output only.
+    Coords position;
+    Coords velocity;
 
     template<class Archive>
     void serialize(Archive& ar, const unsigned int version)
     {
         ar & id;
         ar & relative_pressure;
-        ar & velocity_change;
+        ar & theta_change;
+        ar & speed_change;
+        ar & position;
+        ar & velocity;
     }
 };
 struct ActionRequest {
