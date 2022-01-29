@@ -58,16 +58,20 @@ Description
 struct Coords {
     double x = 0;
     double y = 0;
+    Coords(double x_, double y_): x(x_), y(y_) {}
+    Coords() {}
     Coords& operator+=(Coords other) {
         x += other.x;
         y += other.y;
         return *this;
     }
-    void Clamp(int32_t min_x, int32_t max_x, int32_t min_y, int32_t max_y) {
-        if (x < min_x) x = min_x;
-        if (x >= max_x) x = max_x - 1;
-        if (y < min_y) y = min_y;
-        if (y >= max_y) y = max_y - 1;
+    std::pair<bool, bool> Clamp(int32_t min_x, int32_t max_x, int32_t min_y, int32_t max_y) {
+        std::pair<bool, bool> clamped;
+        if (x < min_x) {x = min_x; clamped.first = true; }
+        if (x > max_x - 1) { x = max_x - 1; clamped.first = true; }
+        if (y < min_y) { y = min_y; clamped.second = true; }
+        if (y > max_y - 1) { y = max_y - 1; clamped.second = true; }
+        return clamped;
     }
 
     template<class Archive>
@@ -87,11 +91,14 @@ Coords operator*(const Coords& coords, Number number) {
 struct Actor {
     int32_t id;
     Coords position;
-    double theta = 0.f;
-    double speed = 0.f;
-    double friction = 0.f;
+    double theta = 0.d;
+    double speed = 0.d;
+    double friction = 0.d;
+
     // aiGym-side only.
-    double last_observed_relative_pressure = 0.d;
+    double previous_relative_pressure = 0.d;
+    double previous_theta = 0.d;
+    double previous_speed = 0.d;
 
     template<class Archive>
     void serialize(Archive& ar, const unsigned int version)
@@ -214,14 +221,32 @@ int main(int argc, char *argv[])
                 request.changes.reserve(actors.size());
                 for (auto& pair : actors) {
                     Actor& actor = pair.second;
-                    actor.position += actor.velocity * runTime.deltaTValue();
-                    actor.position.Clamp(0, width, 0, height);
+                    Coords direction = Coords(/*x=*/std::cos(actor.theta), /*y=*/std::sin(actor.theta));
+                    actor.position += direction * actor.speed * runTime.deltaTValue();
+                    std::pair<bool, bool> clamped = actor.position.Clamp(0, width, 0, height);
+                    if (clamped.first) {
+                        if (direction.y > 0) actor.theta = M_PI / 2;
+                        else actor.theta = 3 * M_PI / 2;
+                    }
+                    if (clamped.second) {
+                        if (direction.x > 0) actor.theta = 0;
+                        else actor.theta = M_PI;
+                    }
+                    if (clamped.first && clamped.second) actor.speed = 0.d;
 
                     ActorStateChange state_change;
                     state_change.id = actor.id;
-                    state_change.relative_pressure = getRho(actor.position.x, actor.position.y) - average_pressure;
-                    actor.last_observed_relative_pressure = getRho(actor.position.x, actor.position.y) - average_pressure;
+                    state_change.relative_pressure =
+                        getRho(actor.position.x, actor.position.y) - average_pressure;
+                    state_change.position = actor.position;
+                    state_change.theta_change = actor.theta - actor.previous_theta;
+                    state_change.speed_change = actor.speed - actor.previous_speed;
                     request.changes.push_back(state_change);
+
+                    actor.previous_relative_pressure =
+                        getRho(actor.position.x, actor.position.y) - average_pressure;
+                    actor.previous_theta = actor.theta;
+                    actor.previous_speed = actor.speed;
                 }
 
                 std::ostringstream oss;
@@ -246,10 +271,13 @@ int main(int argc, char *argv[])
                 }
                 for (const ActorStateChange& change : response.changes) {
                     Actor& actor = actors[change.id];
+
                     double value = getRho(actor.position.x, actor.position.y);
-                    value += change.relative_pressure - actor.last_observed_relative_pressure;
+                    value += change.relative_pressure - actor.previous_relative_pressure;
                     setRho(actor.position.x, actor.position.y, value);
-                    actor.velocity += change.velocity_change;
+
+                    actor.theta += change.theta_change;
+                    actor.speed += change.speed_change;
                 }
             }
         }
