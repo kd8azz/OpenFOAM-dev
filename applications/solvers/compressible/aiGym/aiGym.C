@@ -33,8 +33,8 @@ Description
 \*---------------------------------------------------------------------------*/
 
 #include <cmath>
-#include <boost/archive/text_oarchive.hpp>
-#include <boost/archive/text_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
+#include <boost/archive/binary_iarchive.hpp>
 #include <boost/serialization/vector.hpp>
 #include <map>
 #include <sstream>
@@ -96,7 +96,7 @@ struct Actor {
     double friction = 0.d;
 
     // aiGym-side only.
-    double previous_relative_pressure = 0.d;
+    double previous_pressure = 0.d;
     double previous_theta = 0.d;
     double previous_speed = 0.d;
 
@@ -117,7 +117,7 @@ struct Actor {
 struct ActorStateChange {
     int32_t id = 0;
     // +/- from the average pressure at the start of the simulation.
-    double relative_pressure = 0.d;
+    double pressure_change = 0.d;
     double theta_change = 0.f;
     double speed_change = 0.f;
 
@@ -129,7 +129,7 @@ struct ActorStateChange {
     void serialize(Archive& ar, const unsigned int version)
     {
         ar & id;
-        ar & relative_pressure;
+        ar & pressure_change;
         ar & theta_change;
         ar & speed_change;
         ar & position;
@@ -163,11 +163,23 @@ struct ActionResponse {
 
 int main(int argc, char *argv[])
 {
+    Info<< "argc " << argc << "\n";
+    assert(argc == 2);
+    std::string port(argv[1]);
+    {
+        int p = std::stoi(port);
+        assert(p > 5000);
+        assert(p < 8000);
+    }
+    std::string url = "tcp://localhost:";
+    url.append(port);
+    argc = 1;
+
     Info<< "Opening socket to AI controller.\n";
     zmq::context_t context{1};
     zmq::socket_t socket{context, zmq::socket_type::req};
-    socket.connect("tcp://localhost:5555");
-    Info<< "Socket open on this end.\n";
+    socket.connect(url);
+    Info<< "Socket open on this end. (" << url << ")\n";
 
     #include "postProcess.H"
 
@@ -216,69 +228,67 @@ int main(int argc, char *argv[])
     while (pimple.run(runTime))
     {
         {
-            {
-                ActionRequest request;
-                request.changes.reserve(actors.size());
-                for (auto& pair : actors) {
-                    Actor& actor = pair.second;
-                    Coords direction = Coords(/*x=*/std::cos(actor.theta), /*y=*/std::sin(actor.theta));
-                    actor.position += direction * actor.speed * runTime.deltaTValue();
-                    std::pair<bool, bool> clamped = actor.position.Clamp(0, width, 0, height);
-                    if (clamped.first) {
-                        if (direction.y > 0) actor.theta = M_PI / 2;
-                        else actor.theta = 3 * M_PI / 2;
-                    }
-                    if (clamped.second) {
-                        if (direction.x > 0) actor.theta = 0;
-                        else actor.theta = M_PI;
-                    }
-                    if (clamped.first && clamped.second) actor.speed = 0.d;
-
-                    ActorStateChange state_change;
-                    state_change.id = actor.id;
-                    state_change.relative_pressure =
-                        getRho(actor.position.x, actor.position.y) - average_pressure;
-                    state_change.position = actor.position;
-                    state_change.theta_change = actor.theta - actor.previous_theta;
-                    state_change.speed_change = actor.speed - actor.previous_speed;
-                    request.changes.push_back(state_change);
-
-                    actor.previous_relative_pressure =
-                        getRho(actor.position.x, actor.position.y) - average_pressure;
-                    actor.previous_theta = actor.theta;
-                    actor.previous_speed = actor.speed;
+            ActionRequest request;
+            request.changes.reserve(actors.size());
+            for (auto& pair : actors) {
+                Actor& actor = pair.second;
+                Coords direction = Coords(/*x=*/std::cos(actor.theta), /*y=*/std::sin(actor.theta));
+                actor.position += direction * actor.speed * runTime.deltaTValue();
+                std::pair<bool, bool> clamped = actor.position.Clamp(0, width, 0, height);
+                if (clamped.first) {
+                    if (direction.y > 0) actor.theta = M_PI / 2;
+                    else actor.theta = 3 * M_PI / 2;
                 }
+                if (clamped.second) {
+                    if (direction.x > 0) actor.theta = 0;
+                    else actor.theta = M_PI;
+                }
+                if (clamped.first && clamped.second) actor.speed = 0.d;
 
-                std::ostringstream oss;
-                boost::archive::text_oarchive oa(oss);
-                oa << request;
-                socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
+                ActorStateChange state_change;
+                state_change.id = actor.id;
+                state_change.pressure_change =
+                    getRho(actor.position.x, actor.position.y) - actor.previous_pressure;
+                state_change.position = actor.position;
+                state_change.theta_change = actor.theta - actor.previous_theta;
+                state_change.speed_change = actor.speed - actor.previous_speed;
+                request.changes.push_back(state_change);
+
+                actor.previous_pressure =
+                    getRho(actor.position.x, actor.position.y);
+                actor.previous_theta = actor.theta;
+                actor.previous_speed = actor.speed;
             }
 
-            {
-                zmq::message_t reply{};
-                socket.recv(reply, zmq::recv_flags::none);
-                std::istringstream iss(reply.to_string());
-                boost::archive::text_iarchive ia(iss);
-                ActionResponse response;
-                ia >> response;
+            std::ostringstream oss;
+            boost::archive::binary_oarchive oa(oss);
+            oa << request;
+            socket.send(zmq::buffer(oss.str()), zmq::send_flags::none);
+        }
 
-                for (const int32_t erase : response.erase_actors) {
-                    actors.erase(erase);
-                }
-                for (Actor& actor: response.new_actors) {
-                    actors[actor.id] = actor;
-                }
-                for (const ActorStateChange& change : response.changes) {
-                    Actor& actor = actors[change.id];
+        {
+            zmq::message_t reply{};
+            socket.recv(reply, zmq::recv_flags::none);
+            std::istringstream iss(reply.to_string());
+            boost::archive::binary_iarchive ia(iss);
+            ActionResponse response;
+            ia >> response;
 
-                    double value = getRho(actor.position.x, actor.position.y);
-                    value += change.relative_pressure - actor.previous_relative_pressure;
-                    setRho(actor.position.x, actor.position.y, value);
+            for (const int32_t erase : response.erase_actors) {
+                actors.erase(erase);
+            }
+            for (Actor& actor: response.new_actors) {
+                actors[actor.id] = actor;
+            }
+            for (const ActorStateChange& change : response.changes) {
+                Actor& actor = actors[change.id];
 
-                    actor.theta += change.theta_change;
-                    actor.speed += change.speed_change;
-                }
+                double value = getRho(actor.position.x, actor.position.y);
+                value += change.pressure_change;
+                setRho(actor.position.x, actor.position.y, value);
+
+                actor.theta += change.theta_change;
+                actor.speed += change.speed_change;
             }
         }
 
